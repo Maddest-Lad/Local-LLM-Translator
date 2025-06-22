@@ -37,7 +37,8 @@ def encode_image(image):
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-def ocr_image_with_vllm(image_b64):
+def ocr_image_with_vllm(image_b64, timeout=None):
+    import requests
     payload = {
         "model": MODEL_NAME,
         "messages": [{
@@ -50,6 +51,6 @@ def ocr_image_with_vllm(image_b64):
         "temperature": 0.0,
         "max_tokens": 15000
     }
-    response = requests.post(f"{VLLM_API_BASE}/chat/completions", json=payload)
+    response = requests.post(f"{VLLM_API_BASE}/chat/completions", json=payload, timeout=timeout)
     result = response.json()
     return result["choices"][0]["message"]["content"]
