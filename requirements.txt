@@ -1,0 +1,7 @@
+requests
+mss
+pywin32
+pillow
+numpy
+scikit-image
+openai
