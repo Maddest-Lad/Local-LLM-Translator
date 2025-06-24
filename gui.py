@@ -1,472 +1,367 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import threading
-import time
+import threading, time, os
 from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor
 import pygetwindow as gw
 import win32gui
+import translator
 
-# Import your existing modules
-import ocr
-import translation
+DEFAULT_CHECK_INTERVAL = 3
+DEFAULT_SIMILARITY_THRESHOLD = 0.90
+DEFAULT_TIMEOUT = 45
 
-CHECK_INTERVAL = 3
-SIMILARITY_THRESHOLD = 0.90
-OCR_TIMEOUT = 30
-TRANSLATION_TIMEOUT = 15
+class TranslationTaskState:
+    """Manages the running translation task."""
+    def __init__(self):
+        self.is_running = False
+        self.future = None
+        self.lock = threading.Lock()
+        self.start_time = 0
 
-class TranslationBox(tk.Frame):
-    def __init__(self, parent, ocr_text, translation_text, created_time, on_delete=None):
-        super().__init__(parent, bg="#282d31", bd=1, relief="solid")
+    def start(self, future):
+        with self.lock:
+            if self.is_running: return False
+            self.is_running = True
+            self.start_time = time.time()
+            self.future = future
+            return True
+
+    def stop(self):
+        with self.lock:
+            if self.future and not self.future.done():
+                self.future.cancel()
+            self.is_running = False
+            self.future = None
+            self.start_time = 0
+
+    def finish(self):
+        with self.lock:
+            self.is_running = False
+            self.future = None
+            self.start_time = 0
+
+    def get_elapsed(self):
+        return time.time() - self.start_time if self.is_running else 0
+
+class TranslationResultBox(ttk.Frame):
+    def __init__(self, parent, translation, timestamp, on_delete=None):
+        super().__init__(parent, style="Card.TFrame", padding=5)
         self.on_delete = on_delete
-        self.pack(fill="x", padx=5, pady=2)
 
-        # Delete button
-        del_btn = tk.Button(self, text="🗑️", font=("Segoe UI", 8), bg="#8B4513", fg="white",
-                           bd=0, padx=5, pady=2, command=self.delete_box)
-        del_btn.pack(anchor="ne", padx=5, pady=2)
+        # Top bar (timestamp + delete)
+        top = ttk.Frame(self)
+        top.pack(fill="x")
+        ttk.Label(top, text=time.strftime("%H:%M:%S", time.localtime(timestamp)), font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Button(top, text="🗑️", width=3, command=self._delete).pack(side="right")
 
-        # OCR text
-        ocr_label = tk.Label(self, text="OCR:", font=("Segoe UI", 9, "bold"), 
-                            fg="#6cf", bg="#282d31", anchor="w")
-        ocr_label.pack(fill="x", padx=5, pady=(0, 2))
-        
-        ocr_text_label = tk.Label(self, text=ocr_text, fg="#bdf", bg="#282d31", 
-                                 anchor="w", wraplength=400, justify="left")
-        ocr_text_label.pack(fill="x", padx=5, pady=(0, 5))
+        # Label and copy
+        label_row = ttk.Frame(self)
+        label_row.pack(fill="x")
+        ttk.Label(label_row, text="Translation:", font=("Segoe UI", 13, "bold")).pack(side="left", padx=(0,8))
+        ttk.Button(label_row, text="📋", width=3, command=lambda: self._copy(translation)).pack(side="right")
 
         # Translation text
-        trans_label = tk.Label(self, text="Translation:", font=("Segoe UI", 9, "bold"), 
-                              fg="#6f6", bg="#282d31", anchor="w")
-        trans_label.pack(fill="x", padx=5, pady=(0, 2))
-        
-        trans_text_label = tk.Label(self, text=translation_text, fg="#fff", bg="#282d31", 
-                                   anchor="w", wraplength=400, justify="left", 
-                                   font=("Consolas", 11, "bold"))
-        trans_text_label.pack(fill="x", padx=5, pady=(0, 5))
+        self.trans_text_widget = tk.Text(
+            self, height=1, wrap=tk.WORD, font=("Segoe UI", 16, "bold"),
+            bg="#2d2d2d", fg="white", bd=0, highlightthickness=0, relief="flat"
+        )
+        self.trans_text_widget.insert("1.0", translation)
+        self.trans_text_widget.config(state="disabled")
+        self.trans_text_widget.pack(fill="x", expand=True, padx=5, pady=(2,8))
+        self._autoresize()
 
-        # Timestamp
-        time_str = time.strftime("%H:%M:%S", time.localtime(created_time))
-        time_label = tk.Label(self, text=f"🕒 {time_str}", fg="#aaa", bg="#282d31", 
-                             font=("Segoe UI", 8))
-        time_label.pack(anchor="se", padx=5, pady=2)
+        # Make sure the translation box itself fills the width
+        self.pack(fill="x", expand=True, padx=5, pady=4)
 
-    def delete_box(self):
+    def _autoresize(self):
+        self.trans_text_widget.update_idletasks()
+        lines = int(self.trans_text_widget.index('end-1c').split('.')[0])
+        self.trans_text_widget.config(height=min(16, lines + 1))
+
+    def _copy(self, text):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except Exception as e:
+            print(f"Copy failed: {e}")
+
+    def _delete(self):
         if self.on_delete:
             self.on_delete(self)
         self.destroy()
 
-
-class OCRApp:
+class ScreenTranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("OCR + Translation UI")
-        self.root.geometry("1200x800")
-        self.root.minsize(800, 600)
-        self.root.configure(bg="#202124")
-
-        # State variables
+        self.root.title("Screen Translator")
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.task_state = TranslationTaskState()
+        self.result_queue = Queue()
+        self.error_queue = Queue()
         self.selected_hwnd = None
         self.last_image = None
-        self.running = False
-        self.ocr_visible = True
-        self.translation_visible = True
-
-        # Threading
-        self.ocr_thread = None
-        self.translation_thread = None
-        self.stop_ocr_event = threading.Event()
-        self.stop_translation_event = threading.Event()
-        self.ocr_queue = Queue()
-        self.translation_queue = Queue()
-        
-        # Timers
-        self.ocr_time = 0
-        self.translation_time = 0
-        self.ocr_timer_active = False
-        self.translation_timer_active = False
+        self.last_hwnd = None
+        self.translation_boxes = []
+        self.pipeline_running = False
+        self.stop_event = threading.Event()
+        self.monitoring_paused = True
 
         # Settings
-        self.check_interval = CHECK_INTERVAL
-        self.similarity_threshold = SIMILARITY_THRESHOLD
-        self.ocr_timeout = OCR_TIMEOUT
-        self.translation_timeout = TRANSLATION_TIMEOUT
+        self.check_interval = DEFAULT_CHECK_INTERVAL
+        self.similarity_threshold = DEFAULT_SIMILARITY_THRESHOLD
+        self.timeout = DEFAULT_TIMEOUT
 
-        self.translation_boxes = []
+        self.is_dark_theme = True
+        self._setup_theme()
+        self._build_ui()
+        self._ui_loop()
+
+    def _setup_theme(self):
+        try:
+            cur = self.root.tk.call("ttk::style", "theme", "names")
+            if "azure-dark" not in cur:
+                tcl_path = os.path.join("Azure-ttk-theme", "azure.tcl")
+                if os.path.exists(tcl_path):
+                    self.root.tk.call("source", tcl_path)
+            self.root.tk.call("set_theme", "dark")
+        except Exception:
+            pass
+
+    def _build_ui(self):
+        wrapper = ttk.Frame(self.root, padding=5)
+        wrapper.pack(fill="both", expand=True)
+
+        header = ttk.Frame(wrapper, style="Card.TFrame", padding=8)
+        header.pack(fill="x")
+        self.header_label = ttk.Label(header, text="Screen Translator", font=("Segoe UI", 14, "bold"))
+        self.header_label.pack(side="left")
+        ttk.Button(header, text="Settings", style="Accent.TButton", command=self._open_settings).pack(side="left", padx=6)
+        ttk.Button(header, text="Select Program", command=self._program_menu).pack(side="left")
+        ttk.Button(header, text="Reset Cache", command=self._reset_cache).pack(side="left", padx=(4, 0))
+        ttk.Button(header, text="Clear Results", command=self._clear_results).pack(side="left", padx=(4, 0))
+        ttk.Button(header, text="🌙", width=3, command=self._toggle_theme).pack(side="right", padx=(4, 0))
+
+        # Results area
+        main = ttk.Frame(wrapper, style="Card.TFrame", padding=8)
+        main.pack(fill="both", expand=True, pady=5)
+
+        ttk.Label(main, text="Results", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        rf = ttk.Frame(main)
+        rf.pack(fill="both", expand=True, pady=(4, 8))
+
+        self.canvas = tk.Canvas(rf, borderwidth=0)
+        scrollbar = ttk.Scrollbar(rf, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.result_frame = ttk.Frame(self.canvas)
+        self.result_frame_window = self.canvas.create_window(
+            (0, 0), window=self.result_frame, anchor="nw"
+        )
+
+        def _on_canvas_resize(event):
+            self.canvas.itemconfig(self.result_frame_window, width=event.width)
+        self.canvas.bind("<Configure>", _on_canvas_resize)
+
+        def _on_frame_configure(event):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.result_frame.bind("<Configure>", _on_frame_configure)
         
-        self.create_ui()
-        self.poll_queues()
-        self.update_timers()
+        # Controls
+        controls = ttk.Frame(main)
+        controls.pack(fill="x", pady=(8, 0))
+        self.status_label = ttk.Label(controls, text="Idle", font=("Segoe UI", 10))
+        self.status_label.pack(side="left", padx=4)
+        self.toggle_button = ttk.Button(controls, text="▶ Start", style="Accent.TButton", command=self._toggle_monitor)
+        self.toggle_button.pack(side="left")
+        ttk.Button(controls, text="Force Run", command=self._process_now).pack(side="left", padx=(4, 0))
+        ttk.Button(controls, text="Force Stop", command=self._stop_task).pack(side="left", padx=(4, 0))
 
-    def create_ui(self):
-        # Header
-        self.create_header()
-        
-        # Main content area
-        main_frame = tk.Frame(self.root, bg="#202124")
-        main_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # Create paned window
-        self.paned_window = tk.PanedWindow(main_frame, orient=tk.HORIZONTAL, 
-                                          bg="#202124", sashwidth=5, sashrelief="raised")
-        self.paned_window.pack(fill="both", expand=True)
-        
-        # Create panels
-        self.create_ocr_panel()
-        self.create_translation_panel()
-        
-        # Control buttons
-        self.create_controls(main_frame)
-
-    def create_header(self):
-        header = tk.Frame(self.root, bg="#333333", height=50)
-        header.pack(fill="x", padx=10, pady=5)
-        header.pack_propagate(False)
-
-        self.header_label = tk.Label(header, text="OCR + Translation UI", 
-                                    font=("Segoe UI", 14, "bold"), fg="white", bg="#333333")
-        self.header_label.pack(side="left", padx=10, pady=10)
-
-        # Settings button
-        settings_btn = tk.Button(header, text="Settings", bg="#5A8F7B", fg="white", 
-                                bd=0, padx=10, pady=5, command=self.open_settings)
-        settings_btn.pack(side="left", padx=5, pady=10)
-
-        # Program selection
-        program_btn = tk.Button(header, text="Select Program", bg="#6B8CAE", fg="white", 
-                               bd=0, padx=10, pady=5, command=self.show_program_menu)
-        program_btn.pack(side="left", padx=5, pady=10)
-
-        # View toggles
-        view_frame = tk.Frame(header, bg="#333333")
-        view_frame.pack(side="left", padx=10, pady=10)
-        
-        tk.Button(view_frame, text="Toggle OCR", bg="#A67C5A", fg="white", bd=0, 
-                 padx=8, pady=5, command=self.toggle_ocr).pack(side="left", padx=2)
-        tk.Button(view_frame, text="Toggle Translation", bg="#A67C5A", fg="white", bd=0, 
-                 padx=8, pady=5, command=self.toggle_translation).pack(side="left", padx=2)
-
-        # Theme toggle
-        self.theme_btn = tk.Button(header, text="🌙", bg="#7B68A8", fg="white", 
-                                  bd=0, padx=10, pady=5, command=self.toggle_theme)
-        self.theme_btn.pack(side="right", padx=10, pady=10)
-
-    def create_ocr_panel(self):
-        self.ocr_frame = tk.Frame(self.paned_window, bg="#2d2d2d", width=400)
-        
-        # OCR text area
-        text_frame = tk.Frame(self.ocr_frame, bg="#2d2d2d")
-        text_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        self.ocr_text = tk.Text(text_frame, bg="#1e1e1e", fg="#ffffff", 
-                               font=("Consolas", 11), wrap=tk.WORD, bd=1, relief="solid")
-        ocr_scrollbar = tk.Scrollbar(text_frame, orient="vertical", command=self.ocr_text.yview)
-        self.ocr_text.configure(yscrollcommand=ocr_scrollbar.set)
-        
-        self.ocr_text.pack(side="left", fill="both", expand=True)
-        ocr_scrollbar.pack(side="right", fill="y")
-
-        # OCR controls
-        ocr_controls = tk.Frame(self.ocr_frame, bg="#2d2d2d")
-        ocr_controls.pack(fill="x", padx=5, pady=5)
-
-        self.ocr_timer_label = tk.Label(ocr_controls, text="Idle", fg="white", bg="#2d2d2d")
-        self.ocr_timer_label.pack(side="left", padx=5)
-
-        tk.Button(ocr_controls, text="Stop OCR", bg="#B85450", fg="white", bd=0, 
-                 padx=10, pady=5, command=self.stop_ocr).pack(side="left", padx=5)
-        
-        tk.Button(ocr_controls, text="Clear", bg="#607D8B", fg="white", bd=0, 
-                 padx=10, pady=5, command=self.clear_ocr).pack(side="right", padx=5)
-
-        self.paned_window.add(self.ocr_frame)
-
-    def create_translation_panel(self):
-        self.translation_frame = tk.Frame(self.paned_window, bg="#2d2d2d", width=500)
-        
-        # Translation log area with scrollbar
-        log_frame = tk.Frame(self.translation_frame, bg="#2d2d2d")
-        log_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # Canvas for scrollable content
-        self.trans_canvas = tk.Canvas(log_frame, bg="#1e1e1e", bd=1, relief="solid")
-        trans_scrollbar = tk.Scrollbar(log_frame, orient="vertical", command=self.trans_canvas.yview)
-        self.trans_canvas.configure(yscrollcommand=trans_scrollbar.set)
-        
-        # Scrollable frame
-        self.trans_scrollable_frame = tk.Frame(self.trans_canvas, bg="#1e1e1e")
-        self.trans_canvas.create_window((0, 0), window=self.trans_scrollable_frame, anchor="nw")
-        
-        self.trans_canvas.pack(side="left", fill="both", expand=True)
-        trans_scrollbar.pack(side="right", fill="y")
-        
-        # Update scroll region when frame changes
-        self.trans_scrollable_frame.bind("<Configure>", self.on_trans_frame_configure)
-        self.trans_canvas.bind("<Configure>", self.on_trans_canvas_configure)
-
-        # Translation controls
-        trans_controls = tk.Frame(self.translation_frame, bg="#2d2d2d")
-        trans_controls.pack(fill="x", padx=5, pady=5)
-
-        self.translation_timer_label = tk.Label(trans_controls, text="Idle", fg="white", bg="#2d2d2d")
-        self.translation_timer_label.pack(side="left", padx=5)
-
-        tk.Button(trans_controls, text="Stop Translation", bg="#B85450", fg="white", bd=0, 
-                 padx=10, pady=5, command=self.stop_translation).pack(side="left", padx=5)
-        
-        tk.Button(trans_controls, text="Clear", bg="#607D8B", fg="white", bd=0, 
-                 padx=10, pady=5, command=self.clear_translation_log).pack(side="right", padx=5)
-
-        self.paned_window.add(self.translation_frame)
-
-    def create_controls(self, parent):
-        controls = tk.Frame(parent, bg="#202124")
-        controls.pack(fill="x", pady=5)
-
-        self.toggle_button = tk.Button(controls, text="▶ Start", bg="#5A8F7B", fg="white", 
-                                      font=("Segoe UI", 12, "bold"), bd=0, padx=20, pady=10, 
-                                      command=self.toggle_pipeline)
-        self.toggle_button.pack(side="right", padx=10, pady=10)
-
-    def on_trans_frame_configure(self, event):
-        self.trans_canvas.configure(scrollregion=self.trans_canvas.bbox("all"))
-
-    def on_trans_canvas_configure(self, event):
-        canvas_width = event.width
-        self.trans_canvas.itemconfig(self.trans_canvas.find_all()[0], width=canvas_width)
-
-    # UI Event Handlers
-    def clear_ocr(self):
-        self.ocr_text.delete("1.0", tk.END)
-
-    def toggle_ocr(self):
-        if self.ocr_visible:
-            self.paned_window.forget(self.ocr_frame)
-            self.ocr_visible = False
-        else:
-            if self.translation_visible:
-                self.paned_window.add(self.ocr_frame, before=self.translation_frame)
-            else:
-                self.paned_window.add(self.ocr_frame)
-            self.ocr_visible = True
-
-    def toggle_translation(self):
-        if self.translation_visible:
-            self.paned_window.forget(self.translation_frame)
-            self.translation_visible = False
-        else:
-            self.paned_window.add(self.translation_frame)
-            self.translation_visible = True
-
-    def show_program_menu(self):
+    # Program selection
+    def _program_menu(self):
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Full Screen", command=self.select_full_screen)
+        menu.add_command(label="Full Screen", command=self._select_full_screen)
         menu.add_separator()
-        
         for w in gw.getAllWindows():
             if w.title.strip():
-                menu.add_command(label=w.title, command=lambda h=w._hWnd: self.select_hwnd(h))
-        
-        # Show menu at cursor
-        try:
-            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
-        finally:
-            menu.grab_release()
+                menu.add_command(label=w.title, command=lambda h=w._hWnd: self._select_hwnd(h))
+        menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
 
-    def select_hwnd(self, hwnd):
+    def _select_hwnd(self, hwnd):
         self.selected_hwnd = hwnd
-        title = None
-        for w in gw.getAllWindows():
-            if w._hWnd == hwnd:
-                title = w.title.strip()
-                break
-        if title:
-            self.header_label.config(text=f"OCR: {title}")
-        else:
-            self.header_label.config(text="OCR + Translation UI")
+        if self.last_hwnd != hwnd:
+            self.last_image = None
+            self.last_hwnd = hwnd
+        title = next((w.title.strip() for w in gw.getAllWindows() if w._hWnd == hwnd), None)
+        self.header_label.config(text=f"{title}" if title else "Screen Translator")
 
-    def select_full_screen(self):
-        self.selected_hwnd = win32gui.GetDesktopWindow()
-        self.header_label.config(text="OCR: Full Screen")
+    def _select_full_screen(self):
+        hwnd = win32gui.GetDesktopWindow()
+        self.selected_hwnd = hwnd
+        self.last_image = None
+        self.last_hwnd = hwnd
+        self.header_label.config(text="Monitoring: Full Screen")
 
-    def open_settings(self):
-        settings_win = tk.Toplevel(self.root)
-        settings_win.title("Settings")
-        settings_win.geometry("400x300")
-        settings_win.configure(bg="#2d2d2d")
-        settings_win.transient(self.root)
-
-        # Settings form
-        form_frame = tk.Frame(settings_win, bg="#2d2d2d")
-        form_frame.pack(fill="both", expand=True, padx=20, pady=20)
-
-        tk.Label(form_frame, text="Check Interval (sec):", fg="white", bg="#2d2d2d").pack(anchor="w", pady=5)
-        interval_var = tk.IntVar(value=self.check_interval)
-        tk.Scale(form_frame, from_=1, to=10, orient=tk.HORIZONTAL, variable=interval_var,
-                bg="#2d2d2d", fg="white", highlightthickness=0).pack(fill="x", pady=5)
-
-        tk.Label(form_frame, text="Similarity Threshold:", fg="white", bg="#2d2d2d").pack(anchor="w", pady=5)
-        threshold_var = tk.DoubleVar(value=self.similarity_threshold)
-        tk.Scale(form_frame, from_=0.5, to=1.0, resolution=0.01, orient=tk.HORIZONTAL, 
-                variable=threshold_var, bg="#2d2d2d", fg="white", highlightthickness=0).pack(fill="x", pady=5)
-
-        tk.Label(form_frame, text="OCR Timeout (sec):", fg="white", bg="#2d2d2d").pack(anchor="w", pady=5)
-        ocr_timeout_var = tk.IntVar(value=self.ocr_timeout)
-        tk.Scale(form_frame, from_=5, to=120, orient=tk.HORIZONTAL, variable=ocr_timeout_var,
-                bg="#2d2d2d", fg="white", highlightthickness=0).pack(fill="x", pady=5)
-
-        tk.Label(form_frame, text="Translation Timeout (sec):", fg="white", bg="#2d2d2d").pack(anchor="w", pady=5)
-        translation_timeout_var = tk.IntVar(value=self.translation_timeout)
-        tk.Scale(form_frame, from_=3, to=60, orient=tk.HORIZONTAL, variable=translation_timeout_var,
-                bg="#2d2d2d", fg="white", highlightthickness=0).pack(fill="x", pady=5)
-
-        def save_settings():
-            self.check_interval = interval_var.get()
-            self.similarity_threshold = threshold_var.get()
-            self.ocr_timeout = ocr_timeout_var.get()
-            self.translation_timeout = translation_timeout_var.get()
-            settings_win.destroy()
-
-        tk.Button(form_frame, text="Save Settings", bg="#5A8F7B", fg="white", bd=0, 
-                 padx=20, pady=10, command=save_settings).pack(pady=20)
-
-    def toggle_theme(self):
-        # Simple theme toggle - you can expand this
-        current_bg = self.root.cget("bg")
-        if current_bg == "#202124":
-            # Light theme
-            self.root.configure(bg="#f0f0f0")
-            self.theme_btn.config(text="🌞")
-        else:
-            # Dark theme
-            self.root.configure(bg="#202124")
-            self.theme_btn.config(text="🌙")
-
-    def toggle_pipeline(self):
-        if self.running:
-            self.stop_ocr()
-            self.stop_translation()
-            self.toggle_button.config(text="▶ Start", bg="#5A8F7B")
-            self.running = False
-        else:
+    def _toggle_monitor(self):
+        if self.monitoring_paused:
+            # Start monitoring
             if not self.selected_hwnd:
-                messagebox.showwarning("No Program Selected", "Please select a program to monitor first.")
+                messagebox.showwarning("No Program Selected", "Select a program to monitor.")
                 return
-            
-            self.stop_ocr_event.clear()
-            self.stop_translation_event.clear()
-            self.ocr_thread = threading.Thread(target=self.ocr_loop, daemon=True)
-            self.ocr_thread.start()
-            self.toggle_button.config(text="⏸ Stop", bg="#B85450")
-            self.running = True
+            self.monitoring_paused = False
+            self.pipeline_running = True
+            self.stop_event.clear()
+            threading.Thread(target=self._monitor_loop, daemon=True).start()
+            self.status_label.config(text="Monitoring...")
+            self.toggle_button.config(text="⏸ Pause")
+        else:
+            # Pause monitoring
+            self.monitoring_paused = True
+            self.pipeline_running = False
+            self.stop_event.set()
+            self.status_label.config(text="Paused")
+            self.toggle_button.config(text="▶ Start")
 
-    # Core OCR/Translation Logic (simplified from original)
-    def ocr_loop(self):
-        while not self.stop_ocr_event.is_set():
-            if not self.selected_hwnd or not ocr.is_visible(self.selected_hwnd):
+    def _monitor_loop(self):
+        while self.pipeline_running and not self.stop_event.is_set():
+            if not self.selected_hwnd or not translator.is_window_visible(self.selected_hwnd):
                 time.sleep(self.check_interval)
                 continue
-
-            try:
-                screenshot = ocr.screenshot_window(self.selected_hwnd)
-                
-                if self.last_image and ocr.images_are_similar(screenshot, self.last_image, self.similarity_threshold):
+            screenshot = translator.screenshot_window(self.selected_hwnd)
+            if self.last_image is not None and self.last_hwnd == self.selected_hwnd:
+                if translator.images_are_similar(screenshot, self.last_image, self.similarity_threshold):
                     time.sleep(self.check_interval)
                     continue
-
-                self.last_image = screenshot
-                img_b64 = ocr.encode_image(screenshot)
-                
-                self.ocr_timer_active = True
-                self.ocr_time = 0
-                
-                ocr_result = ocr.ocr_image_with_vllm(img_b64, timeout=self.ocr_timeout)
-                self.ocr_timer_active = False
-                
-                if ocr_result:
-                    self.ocr_queue.put(ocr_result)
-                    # Start translation
-                    self.translation_thread = threading.Thread(target=self.translate_text, args=(ocr_result,), daemon=True)
-                    self.translation_thread.start()
-                    
-            except Exception as e:
-                self.ocr_timer_active = False
-                messagebox.showerror("OCR Error", str(e))
-                
+            self.last_image = screenshot
+            self.last_hwnd = self.selected_hwnd
+            if not self.task_state.is_running:
+                self._start_translation_task(screenshot)
             time.sleep(self.check_interval)
 
-    def translate_text(self, ocr_text):
+    def _start_translation_task(self, screenshot):
+        def task():
+            img_b64 = translator.encode_image(screenshot)
+            return translator.translate_screen(img_b64, timeout=self.timeout)
+        future = self.executor.submit(task)
+        if self.task_state.start(future):
+            future.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, future):
         try:
-            self.translation_timer_active = True
-            self.translation_time = 0
-            
-            translation_result = translation.translate_text(ocr_text, timeout=self.translation_timeout)
-            self.translation_timer_active = False
-            
-            if translation_result:
-                translation.log_to_file(ocr_text, translation_result)
-                self.translation_queue.put((ocr_text, translation_result, time.time()))
-                
+            if future.cancelled():
+                self.task_state.finish()
+                return
+            translation = future.result()
+            ts = time.time()
+            self.task_state.finish()
+            if translation:
+                translator.log_translation("", translation)
+                self.result_queue.put((translation, ts))
         except Exception as e:
-            self.translation_timer_active = False
-            messagebox.showerror("Translation Error", str(e))
+            self.task_state.finish()
+            self.error_queue.put(str(e))
 
-    def stop_ocr(self):
-        self.stop_ocr_event.set()
-        self.ocr_timer_active = False
+    def _process_now(self):
+        if not self.selected_hwnd:
+            messagebox.showwarning("No Program Selected", "Select a program first.")
+            return
+        screenshot = translator.screenshot_window(self.selected_hwnd)
+        self.last_image = screenshot
+        self.last_hwnd = self.selected_hwnd
+        if self.task_state.is_running:
+            self._stop_task()
+            time.sleep(0.1)
+        self._start_translation_task(screenshot)
 
-    def stop_translation(self):
-        self.stop_translation_event.set()
-        self.translation_timer_active = False
+    def _stop_task(self):
+        self.task_state.stop()
 
-    def poll_queues(self):
-        # Process OCR results
-        try:
-            while True:
-                ocr_text = self.ocr_queue.get_nowait()
-                self.ocr_text.delete("1.0", tk.END)
-                self.ocr_text.insert(tk.END, ocr_text)
-        except Empty:
-            pass
+    def _reset_cache(self):
+        self.last_image = None
+        self.last_hwnd = None
 
-        # Process translation results
-        try:
-            while True:
-                ocr_text, translation_text, timestamp = self.translation_queue.get_nowait()
-                self.add_translation_box(ocr_text, translation_text, timestamp)
-        except Empty:
-            pass
-
-        self.root.after(200, self.poll_queues)
-
-    def add_translation_box(self, ocr_text, translation_text, timestamp):
-        box = TranslationBox(self.trans_scrollable_frame, ocr_text, translation_text, 
-                           timestamp, on_delete=self.remove_translation_box)
-        self.translation_boxes.append(box)
-        
-        # Auto-scroll to bottom
-        self.root.after(10, lambda: self.trans_canvas.yview_moveto(1.0))
-
-    def remove_translation_box(self, box):
-        if box in self.translation_boxes:
-            self.translation_boxes.remove(box)
-
-    def clear_translation_log(self):
+    def _clear_results(self):
         for box in self.translation_boxes:
             box.destroy()
         self.translation_boxes.clear()
 
-    def update_timers(self):
-        if self.ocr_timer_active:
-            self.ocr_time += 0.2
-            self.ocr_timer_label.config(text=f"⏱️ {self.ocr_time:.1f}s")
-        else:
-            self.ocr_timer_label.config(text="Idle")
+    def _open_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("340x240")
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill="both", expand=True)
 
-        if self.translation_timer_active:
-            self.translation_time += 0.2
-            self.translation_timer_label.config(text=f"⏱️ {self.translation_time:.1f}s")
+        ttk.Label(frame, text="Check Interval (sec):").pack(anchor="w")
+        interval = tk.IntVar(value=self.check_interval)
+        ttk.Scale(frame, from_=1, to=10, orient=tk.HORIZONTAL, variable=interval).pack(fill="x")
+        ttk.Label(frame, textvariable=interval).pack(anchor="w")
+
+        ttk.Label(frame, text="Similarity Threshold:").pack(anchor="w", pady=(10, 0))
+        thresh = tk.DoubleVar(value=self.similarity_threshold)
+        ttk.Scale(frame, from_=0.5, to=1.0, orient=tk.HORIZONTAL, variable=thresh).pack(fill="x")
+        ttk.Label(frame, textvariable=thresh).pack(anchor="w")
+
+        ttk.Label(frame, text="Processing Timeout (sec):").pack(anchor="w", pady=(10, 0))
+        tout = tk.IntVar(value=self.timeout)
+        ttk.Scale(frame, from_=10, to=120, orient=tk.HORIZONTAL, variable=tout).pack(fill="x")
+        ttk.Label(frame, textvariable=tout).pack(anchor="w")
+
+        def save():
+            self.check_interval = interval.get()
+            self.similarity_threshold = thresh.get()
+            self.timeout = tout.get()
+            win.destroy()
+        ttk.Button(frame, text="Save", style="Accent.TButton", command=save).pack(side="right", pady=(16, 0))
+
+    def _toggle_theme(self):
+        try:
+            cur = self.root.tk.call("ttk::style", "theme", "use")
+            if cur == "azure-dark":
+                self.root.tk.call("set_theme", "light")
+                self.is_dark_theme = False
+            else:
+                self.root.tk.call("set_theme", "dark")
+                self.is_dark_theme = True
+        except Exception:
+            pass
+
+    def _ui_loop(self):
+        try:
+            while True:
+                translation, ts = self.result_queue.get_nowait()
+                self._add_result_box(translation, ts)
+        except Empty:
+            pass
+        try:
+            while True:
+                print("Error:", self.error_queue.get_nowait())
+        except Empty:
+            pass
+        self._update_status()
+        self.root.after(200, self._ui_loop)
+
+    def _add_result_box(self, translation, ts):
+        box = TranslationResultBox(self.result_frame, translation, ts, on_delete=self._remove_result_box)
+        self.translation_boxes.append(box)
+        # Schedule scroll after Tkinter redraw
+        self.root.after(50, lambda: self.canvas.yview_moveto(1.0))
+
+    def _remove_result_box(self, box):
+        if box in self.translation_boxes:
+            self.translation_boxes.remove(box)
+
+    def _update_status(self):
+        if self.task_state.is_running:
+            self.status_label.config(text=f"Processing... {self.task_state.get_elapsed():.1f}s")
         else:
-            self.translation_timer_label.config(text="Idle")
-            
-        self.root.after(200, self.update_timers)
+            self.status_label.config(text="Idle")
+
+    def cleanup(self):
+        self.pipeline_running = False
+        self.stop_event.set()
+        self._stop_task()
+        self.executor.shutdown(wait=False)
