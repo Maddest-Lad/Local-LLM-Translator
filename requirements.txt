@@ -1,7 +1,17 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+pydantic
+pywebview
+
+# Original dependencies
 requests
 mss
 pywin32
 pillow
 numpy
 scikit-image
-openai
+
+# Optional for better performance
+python-multipart
+websockets

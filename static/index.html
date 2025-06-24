@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Translator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #2d2d2d;
+            --bg-card: #3a3a3a;
+            --text-primary: #ffffff;
+            --text-secondary: #b0b0b0;
+            --accent: #007acc;
+            --accent-hover: #005a9f;
+            --success: #28a745;
+            --warning: #ffc107;
+            --danger: #dc3545;
+            --border: #4a4a4a;
+            --shadow: rgba(0, 0, 0, 0.3);
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+            padding-top: 140px; /* Space for fixed navbar and controls */
+            overflow-x: auto; /* Allow horizontal scroll if needed */
+        }
+
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: var(--bg-card);
+            border-bottom: 2px solid var(--border);
+            padding: 12px 20px;
+            z-index: 1000;
+            box-shadow: 0 2px 10px var(--shadow);
+            backdrop-filter: blur(10px);
+            overflow-x: auto;
+            overflow-y: visible; /* Allow dropdown to show below navbar */
+        }
+
+        .navbar-container {
+            min-width: 800px; /* Minimum width to prevent squashing */
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+        }
+
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+            white-space: nowrap;
+            flex-shrink: 0; /* Don't shrink the brand */
+        }
+
+        .navbar-brand .logo {
+            font-size: 24px;
+        }
+
+        .navbar-nav {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0; /* Don't shrink the nav buttons */
+        }
+
+        .controls-bar {
+            position: fixed;
+            top: 60px; /* Below navbar */
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 20px;
+            z-index: 999;
+            box-shadow: 0 2px 8px var(--shadow);
+            overflow-x: auto;
+        }
+
+        .controls-container {
+            min-width: 800px; /* Minimum width to prevent squashing */
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+        }
+
+        .status-info {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            flex-shrink: 1;
+        }
+
+        .monitor-controls {
+            display: flex;
+            gap: 10px;
+            flex-shrink: 0; /* Don't shrink the control buttons */
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .btn {
+            padding: 8px 14px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 6px var(--shadow);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-card);
+        }
+
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .status-badge {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-idle {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .status-running {
+            background: var(--success);
+            color: white;
+        }
+
+        .status-paused {
+            background: var(--warning);
+            color: black;
+        }
+
+        .results-section {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px var(--shadow);
+            margin-top: 20px;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .results-header h2 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .results-container {
+            max-height: 600px;
+            overflow-y: auto;
+            padding-right: 10px;
+        }
+
+        .results-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .results-container::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+            border-radius: 4px;
+        }
+
+        .results-container::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        .translation-box {
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border: 1px solid var(--border);
+            transition: transform 0.2s ease;
+        }
+
+        .translation-box:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px var(--shadow);
+        }
+
+        .translation-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .translation-timestamp {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .translation-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-icon {
+            padding: 8px;
+            min-width: 36px;
+            justify-content: center;
+        }
+
+        .translation-content {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 16px;
+            font-size: 16px;
+            line-height: 1.5;
+            border: 1px solid var(--border);
+            word-wrap: break-word;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            margin: 5% auto;
+            padding: 30px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 20px 40px var(--shadow);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-header h2 {
+            font-size: 20px;
+        }
+
+        .close {
+            font-size: 24px;
+            cursor: pointer;
+            color: var(--text-secondary);
+        }
+
+        .close:hover {
+            color: var(--text-primary);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
+        }
+
+        .dropdown {
+            position: relative;
+            display: inline-block;
+        }
+
+        .dropdown-content {
+            display: none;
+            position: fixed; /* Use fixed positioning instead of absolute */
+            background: var(--bg-card);
+            min-width: 250px;
+            max-width: 350px;
+            box-shadow: 0 8px 16px var(--shadow);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            z-index: 1001; /* Higher than navbar */
+            max-height: 400px; /* Increased height to show more programs */
+            overflow-y: auto;
+            top: 60px; /* Position below navbar */
+        }
+
+        .dropdown-content a {
+            color: var(--text-primary);
+            padding: 8px 12px; /* Reduced padding for more compact */
+            text-decoration: none;
+            display: block;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px; /* Smaller font for more compact */
+            white-space: nowrap; /* Prevent text wrapping */
+            overflow: hidden; /* Hide overflow */
+            text-overflow: ellipsis; /* Add ellipsis for long titles */
+        }
+
+        .dropdown-content a:last-child {
+            border-bottom: none;
+        }
+
+        .dropdown-content a:hover {
+            background: var(--bg-secondary);
+        }
+
+        .dropdown.show .dropdown-content {
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding-top: 160px; /* More space on mobile */
+            }
+            
+            .container {
+                padding: 10px;
+            }
+            
+            .navbar-container {
+                min-width: 600px; /* Smaller minimum for mobile */
+            }
+            
+            .controls-container {
+                min-width: 600px; /* Smaller minimum for mobile */
+            }
+            
+            .controls-bar {
+                top: 90px; /* Adjust for taller mobile navbar */
+            }
+
+            .status-info {
+                gap: 10px; /* Smaller gaps on mobile */
+            }
+
+            .monitor-controls {
+                gap: 8px;
+            }
+        }
+
+        .processing-indicator {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-container">
+            <div class="navbar-brand">
+                <span class="logo">🌐</span>
+                <span id="appTitle">Screen Translator</span>
+            </div>
+            <div class="navbar-nav">
+                <button class="btn btn-primary" onclick="openSettings()">⚙️ Settings</button>
+                <button class="btn btn-secondary" onclick="toggleWindowDropdown(event)">🪟 Select Program</button>
+                <button class="btn btn-secondary" onclick="resetCache()">🔄 Reset Cache</button>
+                <button class="btn btn-secondary" onclick="clearResults()">🗑️ Clear Results</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="controls-bar">
+        <div class="controls-container">
+            <div class="status-info">
+                <div id="statusBadge" class="status-badge status-idle">Idle</div>
+                <div id="selectedWindow">No program selected</div>
+                <div id="translationCount">0 translations</div>
+                <div id="taskProgress"></div>
+            </div>
+            <div class="monitor-controls">
+                <button id="toggleBtn" class="btn btn-success" onclick="toggleMonitoring()">▶️ Start</button>
+                <button class="btn btn-secondary" onclick="forceTranslation()">⚡ Force Run</button>
+                <button class="btn btn-danger" onclick="stopTask()">⏹️ Stop Task</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <section class="results-section">
+            <div class="results-header">
+                <h2>Translation Results</h2>
+            </div>
+            <div id="resultsContainer" class="results-container">
+                <div class="empty-state">
+                    <h3>No translations yet</h3>
+                    <p>Select a program and start monitoring to see translations here</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Window dropdown moved outside navbar -->
+    <div id="windowDropdown" class="dropdown-content"></div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Settings</h2>
+                <span class="close" onclick="closeSettings()">&times;</span>
+            </div>
+            <form id="settingsForm">
+                <div class="form-group">
+                    <label for="checkInterval">Check Interval (seconds):</label>
+                    <input type="range" id="checkInterval" min="1" max="10" step="1" value="3">
+                    <span id="checkIntervalValue">3</span>
+                </div>
+                <div class="form-group">
+                    <label for="similarityThreshold">Similarity Threshold:</label>
+                    <input type="range" id="similarityThreshold" min="0.5" max="1.0" step="0.05" value="0.90">
+                    <span id="similarityThresholdValue">0.90</span>
+                </div>
+                <div class="form-group">
+                    <label for="timeout">Processing Timeout (seconds):</label>
+                    <input type="range" id="timeout" min="10" max="120" step="5" value="45">
+                    <span id="timeoutValue">45</span>
+                </div>
+                <div style="text-align: right; margin-top: 30px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        class ScreenTranslatorApp {
+            constructor() {
+                this.ws = null;
+                this.isMonitoring = false;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.translations = new Map();
+                
+                this.initWebSocket();
+                this.initEventListeners();
+                this.loadInitialData();
+            }
+
+            initWebSocket() {
+                const wsUrl = `ws://${window.location.host}/ws`;
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    this.reconnectAttempts = 0;
+                };
+
+                this.ws.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    this.handleWebSocketMessage(message);
+                };
+
+                this.ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    this.attemptReconnect();
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                };
+            }
+
+            attemptReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    console.log(`Attempting to reconnect... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+                    setTimeout(() => this.initWebSocket(), 2000 * this.reconnectAttempts);
+                }
+            }
+
+            handleWebSocketMessage(message) {
+                switch (message.type) {
+                    case 'translation_result':
+                        this.addTranslationResult(message.data);
+                        break;
+                    case 'status_update':
+                        this.updateStatus(message.data);
+                        break;
+                    case 'error':
+                        this.showError(message.data.error, message.data.detail);
+                        break;
+                    case 'task_progress':
+                        this.updateTaskProgress(message.data);
+                        break;
+                }
+            }
+
+            async loadInitialData() {
+                try {
+                    // Load current status
+                    const statusResponse = await fetch('/api/status');
+                    const status = await statusResponse.json();
+                    this.updateStatus(status);
+
+                    // Load existing results
+                    const resultsResponse = await fetch('/api/results');
+                    const results = await resultsResponse.json();
+                    results.forEach(result => this.addTranslationResult(result));
+
+                    // Load windows
+                    await this.loadWindows();
+                } catch (error) {
+                    this.showError('Failed to load initial data', error.message);
+                }
+            }
+
+            async loadWindows() {
+                try {
+                    const response = await fetch('/api/windows');
+                    const data = await response.json();
+                    this.populateWindowDropdown(data.windows);
+                } catch (error) {
+                    console.error('Failed to load windows:', error);
+                }
+            }
+
+            populateWindowDropdown(windows) {
+                const dropdown = document.getElementById('windowDropdown');
+                dropdown.innerHTML = '';
+
+                // Add full screen option
+                const fullScreenOption = document.createElement('a');
+                fullScreenOption.href = '#';
+                fullScreenOption.textContent = 'Full Screen';
+                fullScreenOption.onclick = () => this.selectWindow(null, 'Full Screen');
+                dropdown.appendChild(fullScreenOption);
+
+                // Add separator
+                const separator = document.createElement('div');
+                separator.style.borderTop = '1px solid var(--border)';
+                separator.style.margin = '8px 0';
+                dropdown.appendChild(separator);
+
+                // Add windows
+                windows.forEach(window => {
+                    if (window.title.trim()) {
+                        const option = document.createElement('a');
+                        option.href = '#';
+                        option.textContent = window.title;
+                        option.onclick = () => this.selectWindow(window.hwnd, window.title);
+                        dropdown.appendChild(option);
+                    }
+                });
+            }
+
+            async selectWindow(hwnd, title) {
+                try {
+                    await fetch('/api/window/select', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hwnd, title })
+                    });
+                    this.closeDropdown();
+                } catch (error) {
+                    this.showError('Failed to select window', error.message);
+                }
+            }
+
+            updateStatus(status) {
+                // Update status badge
+                const statusBadge = document.getElementById('statusBadge');
+                statusBadge.className = `status-badge status-${status.status}`;
+                statusBadge.textContent = status.status.charAt(0).toUpperCase() + status.status.slice(1);
+
+                // Update selected window
+                const selectedWindow = document.getElementById('selectedWindow');
+                if (status.selected_window) {
+                    selectedWindow.textContent = `Monitoring: ${status.selected_window.title}`;
+                    document.getElementById('appTitle').textContent = `Screen Translator - ${status.selected_window.title}`;
+                } else {
+                    selectedWindow.textContent = 'No program selected';
+                    document.getElementById('appTitle').textContent = 'Screen Translator';
+                }
+
+                // Update translation count
+                document.getElementById('translationCount').textContent = `${status.translation_count} translations`;
+
+                // Update toggle button
+                const toggleBtn = document.getElementById('toggleBtn');
+                if (status.monitoring_paused) {
+                    toggleBtn.textContent = '▶️ Start';
+                    toggleBtn.className = 'btn btn-success';
+                    this.isMonitoring = false;
+                } else {
+                    toggleBtn.textContent = '⏸️ Pause';
+                    toggleBtn.className = 'btn btn-secondary';
+                    this.isMonitoring = true;
+                }
+
+                // Update task progress
+                this.updateTaskProgress(status.task_state);
+            }
+
+            updateTaskProgress(taskState) {
+                const progressElement = document.getElementById('taskProgress');
+                if (taskState.is_running) {
+                    progressElement.innerHTML = `
+                        <span>Processing... ${taskState.elapsed_time.toFixed(1)}s</span>
+                        <div class="processing-indicator"></div>
+                    `;
+                } else {
+                    progressElement.innerHTML = '';
+                }
+            }
+
+            addTranslationResult(result) {
+                this.translations.set(result.id, result);
+                
+                const container = document.getElementById('resultsContainer');
+                
+                // Remove empty state if it exists
+                const emptyState = container.querySelector('.empty-state');
+                if (emptyState) {
+                    emptyState.remove();
+                }
+
+                // Create translation box
+                const box = document.createElement('div');
+                box.className = 'translation-box';
+                box.innerHTML = `
+                    <div class="translation-header">
+                        <div class="translation-timestamp">
+                            ${new Date(result.timestamp).toLocaleTimeString()}
+                            ${result.processing_time ? `(${result.processing_time.toFixed(1)}s)` : ''}
+                        </div>
+                        <div class="translation-actions">
+                            <button class="btn btn-secondary btn-icon" onclick="app.copyTranslation('${result.id}')" title="Copy">
+                                📋
+                            </button>
+                            <button class="btn btn-danger btn-icon" onclick="app.deleteTranslation('${result.id}')" title="Delete">
+                                🗑️
+                            </button>
+                        </div>
+                    </div>
+                    <div class="translation-content">${this.escapeHtml(result.translation)}</div>
+                `;
+
+                // Add to top of container
+                container.insertBefore(box, container.firstChild);
+
+                // Scroll to top
+                container.scrollTop = 0;
+            }
+
+            async copyTranslation(id) {
+                const result = this.translations.get(id);
+                if (result) {
+                    try {
+                        await navigator.clipboard.writeText(result.translation);
+                        this.showSuccess('Translation copied to clipboard');
+                    } catch (error) {
+                        this.showError('Failed to copy translation', error.message);
+                    }
+                }
+            }
+
+            async deleteTranslation(id) {
+                try {
+                    await fetch(`/api/results/${id}`, { method: 'DELETE' });
+                    this.translations.delete(id);
+                    
+                    // Remove from DOM
+                    const boxes = document.querySelectorAll('.translation-box');
+                    boxes.forEach(box => {
+                        const deleteBtn = box.querySelector(`[onclick="app.deleteTranslation('${id}')"]`);
+                        if (deleteBtn) {
+                            box.remove();
+                        }
+                    });
+
+                    // Show empty state if no translations left
+                    if (this.translations.size === 0) {
+                        this.showEmptyState();
+                    }
+                } catch (error) {
+                    this.showError('Failed to delete translation', error.message);
+                }
+            }
+
+            showEmptyState() {
+                const container = document.getElementById('resultsContainer');
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <h3>No translations yet</h3>
+                        <p>Select a program and start monitoring to see translations here</p>
+                    </div>
+                `;
+            }
+
+            async toggleMonitoring() {
+                try {
+                    const action = this.isMonitoring ? 'pause' : 'start';
+                    await fetch('/api/monitor/control', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action })
+                    });
+                } catch (error) {
+                    this.showError('Failed to toggle monitoring', error.message);
+                }
+            }
+
+            async forceTranslation() {
+                try {
+                    await fetch('/api/translate/force', { method: 'POST' });
+                } catch (error) {
+                    this.showError('Failed to force translation', error.message);
+                }
+            }
+
+            async stopTask() {
+                try {
+                    await fetch('/api/task/stop', { method: 'POST' });
+                } catch (error) {
+                    this.showError('Failed to stop task', error.message);
+                }
+            }
+
+            async resetCache() {
+                try {
+                    await fetch('/api/cache/reset', { method: 'POST' });
+                    this.showSuccess('Cache reset successfully');
+                } catch (error) {
+                    this.showError('Failed to reset cache', error.message);
+                }
+            }
+
+            async clearResults() {
+                try {
+                    await fetch('/api/results', { method: 'DELETE' });
+                    this.translations.clear();
+                    this.showEmptyState();
+                    this.showSuccess('Results cleared successfully');
+                } catch (error) {
+                    this.showError('Failed to clear results', error.message);
+                }
+            }
+
+            initEventListeners() {
+                // Settings form sliders
+                const sliders = ['checkInterval', 'similarityThreshold', 'timeout'];
+                sliders.forEach(id => {
+                    const slider = document.getElementById(id);
+                    const valueSpan = document.getElementById(id + 'Value');
+                    slider.addEventListener('input', () => {
+                        valueSpan.textContent = slider.value;
+                    });
+                });
+
+                // Settings form submission
+                document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    await this.saveSettings();
+                });
+
+                // Close dropdown when clicking outside
+                document.addEventListener('click', (e) => {
+                    const dropdown = document.getElementById('windowDropdown');
+                    const selectButton = document.querySelector('[onclick*="toggleWindowDropdown"]');
+                    if (!dropdown.contains(e.target) && !selectButton.contains(e.target)) {
+                        dropdown.style.display = 'none';
+                    }
+                });
+            }
+
+            async loadSettings() {
+                try {
+                    const response = await fetch('/api/settings');
+                    const settings = await response.json();
+                    
+                    document.getElementById('checkInterval').value = settings.check_interval;
+                    document.getElementById('checkIntervalValue').textContent = settings.check_interval;
+                    
+                    document.getElementById('similarityThreshold').value = settings.similarity_threshold;
+                    document.getElementById('similarityThresholdValue').textContent = settings.similarity_threshold;
+                    
+                    document.getElementById('timeout').value = settings.timeout;
+                    document.getElementById('timeoutValue').textContent = settings.timeout;
+                } catch (error) {
+                    this.showError('Failed to load settings', error.message);
+                }
+            }
+
+            async saveSettings() {
+                try {
+                    const settings = {
+                        check_interval: parseInt(document.getElementById('checkInterval').value),
+                        similarity_threshold: parseFloat(document.getElementById('similarityThreshold').value),
+                        timeout: parseInt(document.getElementById('timeout').value)
+                    };
+
+                    await fetch('/api/settings', {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(settings)
+                    });
+
+                    closeSettings(); // Use global function instead of this.closeSettings()
+                    this.showSuccess('Settings saved successfully');
+                } catch (error) {
+                    this.showError('Failed to save settings', error.message);
+                }
+            }
+
+            toggleWindowDropdown(event) {
+                event.stopPropagation();
+                const button = event.currentTarget;
+                const dropdown = document.getElementById('windowDropdown');
+
+                // If already open, close it
+                if (dropdown.style.display === 'block') {
+                    dropdown.style.display = 'none';
+                    return;
+                }
+
+                // Populate windows
+                this.loadWindows();
+
+                // Position the dropdown
+                const rect = button.getBoundingClientRect();
+                dropdown.style.display = 'block';
+                dropdown.style.left = rect.left + 'px';
+                dropdown.style.top = (rect.bottom + 4) + 'px';
+                dropdown.style.minWidth = Math.max(rect.width, 250) + 'px';
+                dropdown.style.position = 'fixed';
+
+                // Close when clicking outside
+                document.addEventListener('click', function handler(e) {
+                    if (!dropdown.contains(e.target)) {
+                        dropdown.style.display = 'none';
+                        document.removeEventListener('click', handler);
+                    }
+                });
+            }
+
+            closeDropdown() {
+                const dropdown = document.getElementById('windowDropdown');
+                dropdown.style.display = 'none';
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            showError(message, detail = '') {
+                console.error('Error:', message, detail);
+                // You could implement a toast notification system here
+                alert(`Error: ${message}${detail ? '\n' + detail : ''}`);
+            }
+
+            showSuccess(message) {
+                console.log('Success:', message);
+                // You could implement a toast notification system here
+            }
+        }
+
+        // Global functions for onclick handlers
+        function openSettings() {
+            app.loadSettings();
+            document.getElementById('settingsModal').style.display = 'block';
+        }
+
+        function closeSettings() {
+            document.getElementById('settingsModal').style.display = 'none';
+        }
+
+        function toggleWindowDropdown(event) {
+            app.toggleWindowDropdown(event);
+        }
+
+        function toggleMonitoring() {
+            app.toggleMonitoring();
+        }
+
+        function forceTranslation() {
+            app.forceTranslation();
+        }
+
+        function stopTask() {
+            app.stopTask();
+        }
+
+        function resetCache() {
+            app.resetCache();
+        }
+
+        function clearResults() {
+            app.clearResults();
+        }
+
+        // Initialize app
+        let app;
+        document.addEventListener('DOMContentLoaded', () => {
+            app = new ScreenTranslatorApp();
+        });
+    </script>
+</body>
+</html>

@@ -10,7 +10,7 @@ import win32gui
 from datetime import datetime
 
 GEMMA_API_URL = "http://127.0.0.1:7860/v1/chat/completions"
-GEMMA_MODEL = "google/gemma-3-12b"
+GEMMA_MODEL = "gemma-3-27b-it"
 LOG_FILE = "translation_log.txt"
 
 def is_window_visible(hwnd):
@@ -43,11 +43,40 @@ def encode_image(image):
     image.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+def extract_translation(content):
+    # Remove markdown code blocks
+    content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+
+    # Look for the TRANSLATION block (case-insensitive)
+    match = re.search(r'TRANSLATION:\s*([\s\S]+)', content, flags=re.IGNORECASE)
+    if match:
+        translation = match.group(1).strip()
+    else:
+        # If not found, assume the LLM returned just the translation
+        translation = content.strip()
+
+    # Remove common instruction lines or apologies if present
+    translation = re.sub(
+        r"(instructions?:|the above|as requested|no other commentary|do not include).*",
+        "",
+        translation,
+        flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+
+    # Remove any markdown left (accidental formatting)
+    translation = re.sub(r"^[#>*\-`]", "", translation, flags=re.MULTILINE).strip()
+
+    return translation
+
 def translate_screen(image_b64, timeout=45):
     prompt = (
-        "Extract all visible text from this image and translate it to English (if not already English). Do not include any markdown or formatting in your response\n"
-        "Reply as:\n"
-        "TRANSLATION: [English translation here]"
+        "You are a professional translator. Extract all visible text from the image and translate it to English."
+        "\n\n"
+        "Respond ONLY in the following format, and do not include any original (foreign) text, explanations, or formatting:\n"
+        "TRANSLATION: [The full English translation here, and nothing else]\n\n"
+        "If the text is already in English, output:\n"
+        "TRANSLATION: [The original English text here, and nothing else]\n"
+        "DO NOT REPEAT ANY PART OF THE ORIGINAL (FOREIGN) TEXT IN YOUR RESPONSE."
     )
     payload = {
         "model": GEMMA_MODEL,
@@ -65,17 +94,11 @@ def translate_screen(image_b64, timeout=45):
         resp = requests.post(GEMMA_API_URL, json=payload, timeout=timeout)
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
-
-        # Use regex or a robust split to extract just the TRANSLATION block
-        # Try a simple method first:
-        match = re.search(r'TRANSLATION:\s*([\s\S]+)', content)
-        translation = match.group(1).strip() if match else content
-
-        # Remove any original or instructions prefix if present
+        translation = extract_translation(content)
         return translation
     except Exception as e:
         print(f"Translation API error: {e}")
-        return "",  # Always return a string
+        return ""
 
 def log_translation(original_text, translation_text):
     try:
