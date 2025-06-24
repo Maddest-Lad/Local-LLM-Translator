@@ -178,11 +178,11 @@ class ScreenTranslatorApp {
         // Update toggle button
         const toggleBtn = document.getElementById('toggleBtn');
         if (status.monitoring_paused) {
-            toggleBtn.textContent = '▶️ Start';
+            toggleBtn.textContent = '▶ Start';
             toggleBtn.className = 'btn btn-success';
             this.isMonitoring = false;
         } else {
-            toggleBtn.textContent = '⏸️ Pause';
+            toggleBtn.textContent = '⏸ Pause';
             toggleBtn.className = 'btn btn-secondary';
             this.isMonitoring = true;
         }

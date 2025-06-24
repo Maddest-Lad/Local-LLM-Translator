@@ -121,7 +121,6 @@ def main():
             debug=False,  # Set to True for development
             http_server=False,  # We're using our own server
             user_agent="Local LLM Translator Desktop App",
-            icon="static/icon.svg"
         )
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")
