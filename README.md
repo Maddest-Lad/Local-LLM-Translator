@@ -39,15 +39,7 @@ A modern screen translation application built with FastAPI backend and web front
    pip install -r requirements.txt
    ```
 
-2. **Create Static Directory** (if it doesn't exist)
-   ```bash
-   mkdir static
-   ```
-
-3. **Copy the Web Frontend**
-   - Save the provided `index.html` content to `static/index.html`
-
-4. **Verify Installation**
+2. **Verify Installation**
    ```bash
    python run_app.py --check
    ```
