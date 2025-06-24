@@ -1,162 +1,135 @@
-#!/usr/bin/env python3
 """
-Screen Translator Application Launcher
-
-This script provides multiple ways to run the application:
-1. Desktop app with PyWebView (default)
-2. Web server only (for development/browser access)
-3. API server only (for external integrations)
+Desktop application wrapper for the Local LLM Translator.
 """
 
-import argparse
-import sys
 import os
+import sys
+import threading
+import time
+import webview
+import uvicorn
+from app.main import app as fastapi_app
+from app.utils.logging import setup_logging, get_logger
 
-def run_desktop_app():
-    """Run the desktop application with PyWebView"""
-    try:
-        from desktop_app import main
-        main()
-    except ImportError as e:
-        print(f"Error importing desktop app: {e}")
-        print("Make sure all dependencies are installed: pip install -r requirements.txt")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error running desktop app: {e}")
-        sys.exit(1)
+# Setup logging
+setup_logging()
+logger = get_logger(__name__)
 
-def run_web_server():
-    """Run just the web server (accessible via browser)"""
-    try:
-        import uvicorn
-        from api import app
-        print("Starting web server...")
-        print("Access the application at: http://127.0.0.1:8000")
-        print("Press Ctrl+C to stop the server")
-        uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
-    except ImportError as e:
-        print(f"Error importing web server: {e}")
-        print("Make sure FastAPI and Uvicorn are installed: pip install fastapi uvicorn")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nServer stopped by user")
-    except Exception as e:
-        print(f"Error running web server: {e}")
-        sys.exit(1)
-
-def run_api_only():
-    """Run just the API server (no web UI)"""
-    try:
-        import uvicorn
-        from api import app
-        print("Starting API server...")
-        print("API available at: http://127.0.0.1:8000/docs")
-        print("Press Ctrl+C to stop the server")
-        uvicorn.run(app, host="127.0.0.1", port=8000)
-    except ImportError as e:
-        print(f"Error importing API server: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nAPI server stopped by user")
-    except Exception as e:
-        print(f"Error running API server: {e}")
-        sys.exit(1)
-
-def check_dependencies():
-    """Check if required files and dependencies exist"""
-    required_files = [
-        "models.py",
-        "api.py", 
-        "translator.py",
-        "static/index.html"
-    ]
-    
-    missing_files = []
-    for file in required_files:
-        if not os.path.exists(file):
-            missing_files.append(file)
-    
-    if missing_files:
-        print("Missing required files:")
-        for file in missing_files:
-            print(f"  - {file}")
-        print("\nPlease ensure all files are in the correct location.")
+class DesktopApp:
+    def __init__(self):
+        self.server = None
+        self.server_thread = None
+        self.port = 8000
+        
+    def start_server(self):
+        """Start the FastAPI server in a separate thread"""
+        config = uvicorn.Config(
+            fastapi_app, 
+            host="127.0.0.1", 
+            port=self.port,
+            log_level="info"
+        )
+        self.server = uvicorn.Server(config)
+        
+        def run_server():
+            try:
+                if self.server:
+                    self.server.run()
+                else:
+                    logger.error("Server instance is None, cannot start server")
+            except Exception as e:
+                logger.error(f"Server error: {e}")
+        
+        self.server_thread = threading.Thread(target=run_server, daemon=True)
+        self.server_thread.start()
+        
+        # Wait for server to start
+        max_attempts = 30
+        for i in range(max_attempts):
+            try:
+                import requests
+                response = requests.get(f"http://127.0.0.1:{self.port}/health", timeout=1)
+                if response.status_code == 200:
+                    logger.info("Server started successfully")
+                    return True
+            except:
+                time.sleep(0.1)
+        
+        logger.error("Failed to start server")
         return False
     
-    return True
+    def stop_server(self):
+        """Stop the FastAPI server"""
+        if self.server:
+            self.server.should_exit = True
+    
+    def on_window_closed(self):
+        """Called when the webview window is closed"""
+        logger.info("Window closed, shutting down server...")
+        self.stop_server()
+    
+    def create_window(self):
+        """Create and configure the webview window"""
+        return webview.create_window(
+            title="Local LLM Translator",
+            url=f"http://127.0.0.1:{self.port}",
+            width=1200,
+            height=800,
+            min_size=(800, 600),
+            resizable=True,
+            on_top=False,
+            maximized=False,
+            minimized=False,
+            fullscreen=False,
+        )
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Screen Translator Application",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python run_app.py                 # Run desktop app (default)
-  python run_app.py --mode web      # Run web server for browser access
-  python run_app.py --mode api      # Run API server only
-  python run_app.py --check         # Check dependencies and files
-        """
-    )
+    """Main entry point for the desktop application"""
     
-    parser.add_argument(
-        "--mode", 
-        choices=["desktop", "web", "api"],
-        default="desktop",
-        help="Application mode (default: desktop)"
-    )
+    # Check if required directories exist
+    static_dir = "static"
+    if not os.path.exists(static_dir):
+        os.makedirs(static_dir)
+        logger.info(f"Created {static_dir} directory")
     
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Check dependencies and required files"
-    )
+    # Check if index.html exists
+    index_path = os.path.join(static_dir, "index.html")
+    if not os.path.exists(index_path):
+        logger.warning(f"Warning: {index_path} not found!")
+        logger.warning("Please make sure the web frontend files are in the static/ directory")
     
-    args = parser.parse_args()
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
     
-    if args.check:
-        print("Checking dependencies and files...")
-        if check_dependencies():
-            print("✓ All required files found")
-        else:
-            sys.exit(1)
-        
-        # Try importing key dependencies
-        try:
-            import fastapi
-            import uvicorn
-            import pydantic
-            print("✓ Core web dependencies available")
-        except ImportError as e:
-            print(f"✗ Missing web dependencies: {e}")
-        
-        try:
-            import webview
-            print("✓ PyWebView available for desktop mode")
-        except ImportError:
-            print("✗ PyWebView not available (desktop mode disabled)")
-        
-        try:
-            import translator
-            print("✓ Translation module available")
-        except ImportError as e:
-            print(f"✗ Translation module error: {e}")
-        
-        return
+    # Create and start the desktop app
+    desktop_app = DesktopApp()
     
-    # Check required files before starting
-    if not check_dependencies():
+    logger.info("Starting FastAPI server...")
+    if not desktop_app.start_server():
+        logger.error("Failed to start server. Exiting.")
         sys.exit(1)
     
-    # Run the application based on mode
-    if args.mode == "desktop":
-        print("Starting Screen Translator Desktop App...")
-        run_desktop_app()
-    elif args.mode == "web":
-        print("Starting Screen Translator Web Server...")
-        run_web_server()
-    elif args.mode == "api":
-        print("Starting Screen Translator API Server...")
-        run_api_only()
+    logger.info("Creating webview window...")
+    window = desktop_app.create_window()
+    
+    # Set up window event handlers
+    window.events.closed += desktop_app.on_window_closed
+    
+    # Start the webview
+    try:
+        webview.start(
+            debug=False,  # Set to True for development
+            http_server=False,  # We're using our own server
+            user_agent="Local LLM Translator Desktop App",
+            icon="static/icon.svg"
+        )
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user")
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+    finally:
+        desktop_app.stop_server()
+        logger.info("Application closed")
 
 if __name__ == "__main__":
     main()

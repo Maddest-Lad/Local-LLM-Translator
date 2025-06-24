@@ -1,17 +1,13 @@
-# Core dependencies
 fastapi
-uvicorn[standard]
+uvicorn
 pydantic
-pywebview
-
-# Original dependencies
-requests
-mss
-pywin32
-pillow
-numpy
-scikit-image
-
-# Optional for better performance
 python-multipart
 websockets
+requests
+pillow
+numpy
+opencv-python
+pywin32
+pytesseract
+python-dotenv
+pywebview
