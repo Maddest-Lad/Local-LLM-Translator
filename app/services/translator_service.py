@@ -1,10 +1,11 @@
 """
-Service for translating text using LLM models.
+Service for translating text using LLM models
 """
 
 import re
 import json
 import requests
+import asyncio
 from typing import Optional, Generator, Callable
 from datetime import datetime
 from app.utils.logging import get_logger, log_function_call
@@ -58,8 +59,9 @@ def extract_translation(content: str) -> str:
 def stream_translation(
     extracted_text: str, 
     timeout: int = 45, 
-    translation_model_id: str = DEFAULT_TRANSLATION_MODEL
-) -> Generator[str, None, None]:
+    translation_model_id: str = DEFAULT_TRANSLATION_MODEL,
+    stream_callback: Optional[Callable[[str], None]] = None
+) -> str:
     """
     Stream translation of text using LM Studio's native API.
     
@@ -67,9 +69,10 @@ def stream_translation(
         extracted_text: Text to translate
         timeout: API timeout in seconds
         translation_model_id: Model ID for translation
+        stream_callback: Optional callback for streaming updates
         
-    Yields:
-        Partial translations as they become available
+    Returns:
+        Final translation text
     """
     prompt = (
         "You are a professional translator. Translate the following text to English:"
@@ -95,36 +98,12 @@ def stream_translation(
     try:
         logger.info(f"Starting streaming translation with model {translation_model_id}")
         
-        # Start a thread to yield periodic updates even if the API is slow to respond
-        import threading
-        import time
-        
-        # Flag to signal when to stop the progress updates
-        stop_event = threading.Event()
-        
-        # Variable to store the latest translation
-        latest_translation = "Translating..."
-        
-        # Thread function to yield periodic updates
-        def yield_periodic_updates():
-            last_yield_time = time.time()
-            while not stop_event.is_set():
-                current_time = time.time()
-                # Yield an update every 0.2 seconds if no new content has been received
-                if current_time - last_yield_time >= 0.2:
-                    yield latest_translation
-                    last_yield_time = current_time
-                time.sleep(0.1)
-        
-        # Start the periodic update thread
-        update_thread = threading.Thread(target=lambda: None)  # Dummy thread, we'll use the generator directly
-        
         with requests.post(LM_STUDIO_API_URL, json=payload, timeout=timeout, stream=True) as resp:
             resp.raise_for_status()
             
             # Initialize variables to store the accumulated translation
             accumulated_content = ""
-            last_yield_time = time.time()
+            last_callback_time = 0
             
             # Process the streaming response
             for line in resp.iter_lines():
@@ -149,36 +128,38 @@ def stream_translation(
                                 
                                 if content:
                                     accumulated_content += content
-                                    latest_translation = accumulated_content
                                     
-                                    # Only yield if enough time has passed since last yield
+                                    # Call the callback with some rate limiting
+                                    import time
                                     current_time = time.time()
-                                    if current_time - last_yield_time >= 0.2:
-                                        yield accumulated_content
-                                        last_yield_time = current_time
+                                    if stream_callback and (current_time - last_callback_time >= 0.1):
+                                        try:
+                                            # Extract partial translation and call callback
+                                            partial_translation = extract_translation(accumulated_content)
+                                            stream_callback(partial_translation)
+                                            last_callback_time = current_time
+                                        except Exception as e:
+                                            logger.error(f"Error in stream callback: {e}")
                         except json.JSONDecodeError:
                             logger.warning(f"Failed to parse JSON chunk: {data}")
                             continue
-                
-                # Yield periodic updates even if no new content
-                current_time = time.time()
-                if current_time - last_yield_time >= 0.5:
-                    yield accumulated_content if accumulated_content else "Translating..."
-                    last_yield_time = current_time
             
-            # Final yield with extracted translation
+            # Final extraction and callback
             final_translation = extract_translation(accumulated_content)
-            yield final_translation
+            if stream_callback:
+                try:
+                    stream_callback(final_translation)
+                except Exception as e:
+                    logger.error(f"Error in final stream callback: {e}")
             
             # Log the final translation
             log_translation(extracted_text, final_translation)
             
+            return final_translation
+            
     except Exception as e:
         logger.error(f"Translation API error: {e}")
-        yield ""
-    finally:
-        # Signal any background threads to stop
-        stop_event.set()
+        return ""
 
 @log_function_call
 def translate_text(
@@ -203,17 +184,10 @@ def translate_text(
         logger.warning("Empty text provided for translation")
         return ""
     
-    # Step 2: Translate with streaming if callback is provided
+    # Use streaming translation if callback is provided
     if stream_callback:
-        # Start streaming translation
         logger.info("Using streaming translation")
-        final_translation = ""
-        for partial_translation in stream_translation(text, timeout, translation_model_id):
-            if partial_translation:
-                final_translation = partial_translation
-                # Call the callback with the partial translation
-                stream_callback(partial_translation)
-        return final_translation
+        return stream_translation(text, timeout, translation_model_id, stream_callback)
     else:
         # Non-streaming version (fallback)
         logger.info("Using non-streaming translation")

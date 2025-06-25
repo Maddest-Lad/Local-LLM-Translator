@@ -1,5 +1,5 @@
 """
-Translation endpoints.
+Translation endpoints
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -8,7 +8,6 @@ import asyncio
 import uuid
 from datetime import datetime
 import time
-import queue
 import threading
 
 from app.models import TranslationResult, MonitorControlRequest, TaskStatus
@@ -31,11 +30,26 @@ screen_service = ScreenTranslationService()
 translation_task_running = False
 translation_task_cancel = False
 
-# Create a queue for WebSocket messages
-ws_message_queue = queue.Queue()
+# Use asyncio queue instead of threading queue
+ws_message_queue = None
+message_processor_task = None
 
-# Flag to indicate if the message processor is running
-message_processor_running = False
+# Lock for message processor management
+message_processor_lock = asyncio.Lock()
+
+async def ensure_message_processor():
+    """Ensure the message processor is running."""
+    global message_processor_task, ws_message_queue
+    
+    async with message_processor_lock:
+        if message_processor_task is None or message_processor_task.done():
+            # Create new queue if needed
+            if ws_message_queue is None:
+                ws_message_queue = asyncio.Queue()
+            
+            # Start new message processor task
+            message_processor_task = asyncio.create_task(process_ws_messages())
+            logger.info("Message processor started")
 
 @router.get("/results", response_model=List[TranslationResult])
 async def get_results():
@@ -70,20 +84,18 @@ async def control_monitoring(request: MonitorControlRequest, background_tasks: B
     """Control the monitoring process (start, pause, stop)."""
     logger.info(f"Monitor control: {request.action}")
     
+    # Ensure message processor is running FIRST
+    await ensure_message_processor()
+    
     if request.action == "start":
         app_state["monitoring_paused"] = False
         app_state["status"] = TaskStatus.RUNNING
         
         # Start the monitoring task if not already running
-        global translation_task_running, translation_task_cancel, message_processor_running
+        global translation_task_running, translation_task_cancel
         if not translation_task_running:
             translation_task_cancel = False
             background_tasks.add_task(monitoring_task)
-        
-        # Start the message processor task if not already running
-        if not message_processor_running:
-            message_processor_running = True
-            background_tasks.add_task(process_ws_messages)
             
     elif request.action == "pause":
         app_state["monitoring_paused"] = True
@@ -107,11 +119,8 @@ async def force_translation(background_tasks: BackgroundTasks):
     if app_state["selected_window"] is None:
         raise HTTPException(status_code=400, detail="No window selected")
     
-    # Start the message processor task if not already running
-    global message_processor_running
-    if not message_processor_running:
-        message_processor_running = True
-        background_tasks.add_task(process_ws_messages)
+    # Ensure message processor is running FIRST
+    await ensure_message_processor()
     
     # Start a one-time translation task
     background_tasks.add_task(one_time_translation_task)
@@ -147,6 +156,12 @@ async def one_time_translation_task():
         logger.warning("No window selected for one-time translation")
         return
     
+    # Ensure message processor is running
+    await ensure_message_processor()
+    
+    # Store the main loop reference for callbacks
+    await _ensure_loop_reference()
+    
     # Update task state
     start_time = time.time()
     app_state["task_state"] = app_state["task_state"].copy(update={
@@ -155,16 +170,10 @@ async def one_time_translation_task():
         "start_time": datetime.now()
     })
     
-    # Start the message processor task if not already running
-    global message_processor_running
-    if not message_processor_running:
-        message_processor_running = True
-        asyncio.create_task(process_ws_messages())
-    
     # Start a timer task to update progress continuously
     timer_task = asyncio.create_task(update_task_timer())
     
-    # Broadcast task progress
+    # Broadcast task progress immediately
     await broadcast_task_progress()
     
     try:
@@ -200,6 +209,12 @@ async def monitoring_task():
     translation_task_running = True
     try:
         logger.info("Starting monitoring task")
+        
+        # Ensure message processor is running
+        await ensure_message_processor()
+        
+        # Store the main loop reference for callbacks
+        await _ensure_loop_reference()
         
         while not translation_task_cancel:
             # Check if monitoring is paused
@@ -237,31 +252,86 @@ def stream_translation_callback(result: TranslationResult):
         elapsed = (datetime.now() - app_state["task_state"].start_time).total_seconds()
         app_state["task_state"] = app_state["task_state"].copy(update={"elapsed_time": elapsed})
     
-    # Instead of trying to run async functions directly, add messages to the queue
-    # for processing by the message processor task
+    # Get the event loop safely - this might be called from any thread
     try:
-        # Add translation result message to queue
-        ws_message_queue.put(("translation_result", result))
+        # Try to get the running loop if we're in an async context
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # We're not in an async context, try to get the main thread's loop
+            # We need to store the main loop reference when the app starts
+            loop = getattr(stream_translation_callback, '_main_loop', None)
+            if loop is None:
+                logger.error("No event loop available for WebSocket callback")
+                return
         
-        # Add task progress message to queue
-        ws_message_queue.put(("task_progress", app_state["task_state"]))
+        # Schedule the queue operations to run in the event loop
+        if ws_message_queue is not None:
+            # Use call_soon_threadsafe to safely schedule from any thread
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(queue_translation_result(result))
+            )
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(queue_task_progress())
+            )
     except Exception as e:
         logger.error(f"Error in stream_translation_callback: {e}")
 
+# Store the main event loop reference when the module is loaded
+def _store_main_loop():
+    """Store reference to the main event loop for use in callbacks."""
+    try:
+        loop = asyncio.get_running_loop()
+        stream_translation_callback._main_loop = loop
+        logger.debug("Stored main event loop reference")
+    except RuntimeError:
+        logger.warning("No running event loop to store")
+
+# Call this when starting async operations
+async def _ensure_loop_reference():
+    """Ensure we have a reference to the main event loop."""
+    if not hasattr(stream_translation_callback, '_main_loop'):
+        try:
+            loop = asyncio.get_running_loop()
+            stream_translation_callback._main_loop = loop
+            logger.debug("Stored main event loop reference")
+        except RuntimeError:
+            logger.warning("No running event loop to store")
+
+async def queue_translation_result(result: TranslationResult):
+    """Queue a translation result for WebSocket broadcast."""
+    global ws_message_queue
+    if ws_message_queue is not None:
+        try:
+            await ws_message_queue.put(("translation_result", result))
+        except Exception as e:
+            logger.error(f"Error queueing translation result: {e}")
+
+async def queue_task_progress():
+    """Queue a task progress update for WebSocket broadcast."""
+    global ws_message_queue
+    if ws_message_queue is not None:
+        try:
+            await ws_message_queue.put(("task_progress", app_state["task_state"]))
+        except Exception as e:
+            logger.error(f"Error queueing task progress: {e}")
+
 async def process_ws_messages():
     """Process WebSocket messages from the queue."""
-    global message_processor_running
+    global ws_message_queue
+    
+    logger.info("Starting WebSocket message processor")
+    
     try:
-        logger.info("Starting WebSocket message processor")
-        
         while True:
             try:
-                # Try to get a message from the queue with a timeout
+                # Wait for a message with a reasonable timeout
                 try:
-                    message_type, data = ws_message_queue.get(timeout=0.1)
-                except queue.Empty:
-                    # No message in queue, sleep briefly and continue
-                    await asyncio.sleep(0.1)
+                    message_type, data = await asyncio.wait_for(
+                        ws_message_queue.get(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    # No message in queue, continue
                     continue
                 
                 # Process the message based on its type
@@ -274,27 +344,47 @@ async def process_ws_messages():
                 
                 # Mark the task as done
                 ws_message_queue.task_done()
+                
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
                 await asyncio.sleep(0.5)  # Sleep briefly before retrying
+                
     except asyncio.CancelledError:
         logger.info("WebSocket message processor cancelled")
+        raise
     except Exception as e:
         logger.error(f"WebSocket message processor error: {e}")
     finally:
-        message_processor_running = False
         logger.info("WebSocket message processor stopped")
 
 async def broadcast_translation_result(result: TranslationResult):
     """Broadcast a translation result."""
-    message = TranslationResultMessage(data=result)
-    await manager.broadcast(message.model_dump(mode="json"))
+    try:
+        # Check if we have active connections
+        if not manager.active_connections:
+            logger.debug("No active WebSocket connections for translation result")
+            return
+            
+        message = TranslationResultMessage(data=result)
+        await manager.broadcast(message.model_dump(mode="json"))
+        logger.debug(f"Broadcasted translation result to {len(manager.active_connections)} connections")
+    except Exception as e:
+        logger.error(f"Error broadcasting translation result: {e}")
 
 async def broadcast_status():
     """Broadcast the current application status."""
-    status = await get_status_for_broadcast()
-    message = StatusUpdateMessage(data=status)
-    await manager.broadcast(message.model_dump(mode="json"))
+    try:
+        # Check if we have active connections
+        if not manager.active_connections:
+            logger.debug("No active WebSocket connections for status")
+            return
+            
+        status = await get_status_for_broadcast()
+        message = StatusUpdateMessage(data=status)
+        await manager.broadcast(message.model_dump(mode="json"))
+        logger.debug(f"Broadcasted status to {len(manager.active_connections)} connections")
+    except Exception as e:
+        logger.error(f"Error broadcasting status: {e}")
 
 async def get_status_for_broadcast():
     """Get the current status for broadcasting."""
@@ -303,11 +393,22 @@ async def get_status_for_broadcast():
 
 async def broadcast_task_progress():
     """Broadcast the current task progress."""
-    message = TaskProgressMessage(data=app_state["task_state"])
-    await manager.broadcast(message.model_dump(mode="json"))
+    try:
+        # Check if we have active connections
+        if not manager.active_connections:
+            logger.debug("No active WebSocket connections for task progress")
+            return
+            
+        message = TaskProgressMessage(data=app_state["task_state"])
+        await manager.broadcast(message.model_dump(mode="json"))
+        logger.debug(f"Broadcasted task progress to {len(manager.active_connections)} connections")
+    except Exception as e:
+        logger.error(f"Error broadcasting task progress: {e}")
 
 async def update_task_timer():
     """Periodically update the task timer and broadcast progress."""
+    global ws_message_queue
+    
     try:
         while app_state["task_state"].is_running:
             # Update elapsed time if task is running
@@ -315,11 +416,15 @@ async def update_task_timer():
                 elapsed = (datetime.now() - app_state["task_state"].start_time).total_seconds()
                 app_state["task_state"] = app_state["task_state"].copy(update={"elapsed_time": elapsed})
                 
-                # Add task progress message to queue
-                ws_message_queue.put(("task_progress", app_state["task_state"]))
+                # Queue task progress message
+                if ws_message_queue is not None:
+                    try:
+                        await ws_message_queue.put(("task_progress", app_state["task_state"]))
+                    except Exception as e:
+                        logger.error(f"Error queueing timer update: {e}")
             
-            # Update every 0.2 seconds for smooth timer display
-            await asyncio.sleep(0.2)
+            # Update every 0.1 seconds for smooth timer display
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         # Task was cancelled, which is expected
         pass

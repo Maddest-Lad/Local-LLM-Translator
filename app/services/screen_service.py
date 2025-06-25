@@ -1,5 +1,5 @@
 """
-Service for capturing and translating screen content.
+Service for capturing and translating screen content
 """
 
 import asyncio
@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Callable, Dict, Any
 from PIL import Image
+import threading
 
 from app.utils.logging import get_logger, log_function_call
 from app.utils.window import screenshot_window, is_window_visible
@@ -51,6 +52,9 @@ class ScreenTranslationService:
         start_time = time.time()
         translation_id = str(uuid.uuid4())
         
+        # Get the current event loop for callback scheduling
+        main_loop = asyncio.get_running_loop()
+        
         # Create initial result with empty translation
         result = TranslationResult(
             id=translation_id,
@@ -90,25 +94,15 @@ class ScreenTranslationService:
             logger.info(f"Extracting text using OCR model {ocr_model_id}")
             ocr_provider = create_ocr_provider(ocr_model_id)
             
-            # Create a wrapper function that updates progress during OCR
-            def ocr_with_progress_updates():
-                # Start time for this specific operation
-                ocr_start_time = time.time()
-                
-                # Create a flag to signal when to stop the progress updates
-                import threading
-                stop_event = threading.Event()
-                
-                # Send periodic progress updates during OCR
+            # Create a safe callback wrapper for OCR progress updates
+            def safe_ocr_progress_callback():
                 def update_progress():
                     while not stop_event.is_set():
-                        # Calculate elapsed time for the entire process
                         current_time = time.time()
                         total_elapsed = current_time - start_time
                         
-                        # Update the result with progress
-                        nonlocal result
-                        result = TranslationResult(
+                        # Create progress result
+                        progress_result = TranslationResult(
                             id=translation_id,
                             translation="Running OCR...",
                             timestamp=datetime.now(),
@@ -117,30 +111,38 @@ class ScreenTranslationService:
                             stage="ocr"
                         )
                         
-                        # Call the callback if provided
+                        # Schedule callback in main thread
                         if stream_callback:
-                            stream_callback(result)
+                            try:
+                                main_loop.call_soon_threadsafe(lambda: stream_callback(progress_result))
+                            except Exception as e:
+                                logger.error(f"Error scheduling OCR progress callback: {e}")
+                                break
                         
-                        # Sleep for a short time
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                 
-                # Start the progress update thread
-                progress_thread = threading.Thread(target=update_progress)
-                progress_thread.daemon = True
+                # Create stop event and start thread
+                stop_event = threading.Event()
+                progress_thread = threading.Thread(target=update_progress, daemon=True)
                 progress_thread.start()
                 
-                try:
-                    # Run the actual OCR
-                    text = ocr_provider.extract_text(img_b64, timeout)
-                    return text
-                finally:
-                    # Signal the progress thread to stop
-                    stop_event.set()
-                    # Wait for the thread to finish
-                    progress_thread.join(timeout=1.0)
+                return stop_event, progress_thread
             
-            # Execute OCR with progress updates
-            extracted_text = await loop.run_in_executor(None, ocr_with_progress_updates)
+            # Start OCR with progress updates
+            stop_event, progress_thread = safe_ocr_progress_callback()
+            
+            try:
+                # Run OCR
+                extracted_text = await loop.run_in_executor(
+                    None, 
+                    ocr_provider.extract_text, 
+                    img_b64, 
+                    timeout
+                )
+            finally:
+                # Stop progress updates
+                stop_event.set()
+                progress_thread.join(timeout=1.0)
             
             if not extracted_text:
                 logger.warning("No text extracted from image")
@@ -171,14 +173,13 @@ class ScreenTranslationService:
             if stream_callback:
                 stream_callback(result)
             
-            # Define a callback for streaming updates
-            def stream_translation_callback(partial_translation: str):
-                nonlocal result
+            # Create a safe translation callback wrapper
+            def safe_translation_callback(partial_translation: str):
                 current_time = time.time()
                 processing_time = current_time - start_time
                 
                 # Update the result with the partial translation
-                result = TranslationResult(
+                progress_result = TranslationResult(
                     id=translation_id,
                     translation=partial_translation,
                     timestamp=datetime.now(),
@@ -187,21 +188,22 @@ class ScreenTranslationService:
                     stage="translating"
                 )
                 
+                # Schedule callback in main thread safely
                 if stream_callback:
-                    stream_callback(result)
+                    try:
+                        main_loop.call_soon_threadsafe(lambda: stream_callback(progress_result))
+                    except Exception as e:
+                        logger.error(f"Error scheduling translation callback: {e}")
             
             # Run translation with streaming
             if stream_callback:
-                # Use the callback directly since it's now synchronous
-                sync_callback = stream_translation_callback
-                
-                # Execute translation in thread pool
+                # Execute translation in thread pool with safe callback
                 final_translation = await loop.run_in_executor(
                     None,
                     lambda: translate_text(
                         extracted_text,
                         timeout,
-                        sync_callback,
+                        safe_translation_callback,
                         translation_model_id
                     )
                 )
