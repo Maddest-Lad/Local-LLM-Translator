@@ -48,32 +48,10 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Install Tesseract OCR:
-   - Windows: Download and install from https://github.com/UB-Mannheim/tesseract/wiki
-   - Linux: `sudo apt install tesseract-ocr`
-   - macOS: `brew install tesseract`
-
 ## Usage
-
-1. Start the application:
+1. Start an OpenAI-compatible server, this was built for LM Studio + SSE Streaming
+2. Set the Local or Remote LLM URL in the settings
+3. Start the application and select the VLM, LLM and endpoint in the settings:
 ```bash
 python run_app.py
 ```
-
-2. Open your browser and navigate to:
-```
-http://localhost:8000
-```
-
-3. Select a window to translate and configure settings as needed.
-
-## API Documentation
-
-Once the application is running, you can access the API documentation at:
-```
-http://localhost:8000/docs
-```
-
-## License
-
-MIT
