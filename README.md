@@ -50,8 +50,7 @@ pip install -r requirements.txt
 
 ## Usage
 1. Start an OpenAI-compatible server, this was built for LM Studio + SSE Streaming
-2. Set the Local or Remote LLM URL in the settings
-3. Start the application and select the VLM, LLM and endpoint in the settings:
+2. Start the application and select the VLM, LLM, and LM Studio / OpenAI compatible endpoint in the settings:
 ```bash
 python run_app.py
 ```
